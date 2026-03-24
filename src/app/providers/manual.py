@@ -33,8 +33,7 @@ def metadata(media_id, media_type):
             response["details"]["seasons"] = season_items.count()
 
         num_episodes = process_seasons(season_items, response)
-        response["max_progress"] = num_episodes
-        response["details"]["episodes"] = num_episodes
+        set_max_progress(response, num_episodes, item.media_type)
     elif media_type == MediaTypes.MOVIE.value:
         response["max_progress"] = 1
 
