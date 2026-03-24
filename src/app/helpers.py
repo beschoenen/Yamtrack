@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.utils.encoding import iri_to_uri
 from django.utils.http import url_has_allowed_host_and_scheme
 
+from app import models
 from app.models import BasicMedia, Item, MediaTypes, Status
 
 YEAR_ONLY_PARTS = 1
@@ -68,6 +69,16 @@ def build_absolute_app_url(request, path):
 
     return request.build_absolute_uri(path)
 
+
+MODEL_MAP = {
+    models.MediaTypes.TV.value: models.TV,
+    models.MediaTypes.MOVIE.value: models.Movie,
+    models.MediaTypes.ANIME.value: models.Anime,
+    models.MediaTypes.MANGA.value: models.Manga,
+    models.MediaTypes.GAME.value: models.Game,
+    models.MediaTypes.BOOK.value: models.Book,
+    models.MediaTypes.COMIC.value: models.Comic,
+}
 
 def minutes_to_hhmm(total_minutes):
     """Convert total minutes to HH:MM format."""
