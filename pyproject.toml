@@ -73,7 +73,20 @@ force-exclude = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["ANN", "PT", "PD", "D100", "D104", "RUF012", "SLF001", "COM812", "CPY001"]
+ignore = [
+  "ANN",
+  "PT",
+  "PD",
+  "D100",
+  "D104",
+  "RUF012",
+  "SLF001",
+  "COM812",
+  "CPY001",
+  "TD002",
+  "TD003",
+  "TD004",
+]
 
 [tool.ruff.lint.pycodestyle]
 max-doc-length = 88
