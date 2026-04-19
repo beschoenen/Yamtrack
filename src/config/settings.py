@@ -133,6 +133,7 @@ INSTALLED_APPS = [
     "django.contrib.humanize",
     "rest_framework",
     "api",
+    "drf_spectacular",
 ]
 
 REST_FRAMEWORK = {
@@ -144,7 +145,9 @@ REST_FRAMEWORK = {
         "api.authentication.APIKeyAuthentication",
     ],
     "DEFAULT_RENDERER_CLASSES": ("rest_framework.renderers.JSONRenderer",),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
+
 
 APPEND_SLASH = True
 
