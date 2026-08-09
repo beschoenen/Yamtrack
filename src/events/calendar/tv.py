@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import requests
 from django.core.cache import cache
@@ -15,6 +15,10 @@ from events.models import Event
 from .helpers import date_parser, resolve_episode_datetimes
 
 logger = logging.getLogger(__name__)
+
+# TMDB air dates carry no time and TVMaze airstamps are exact instants, so the
+# two can land on either side of midnight for the same broadcast.
+TVMAZE_DAY_TOLERANCE = timedelta(days=1)
 
 
 def process_tv(tv_item, events_bulk):
@@ -345,29 +349,96 @@ def process_season_episodes(item, metadata, events_bulk):
 
 def get_episode_datetime(episode, season_number, episode_number, tvmaze_map):
     """Return the known air datetime for an episode, or None when unknown."""
-    tvmaze_key = f"{season_number}_{episode_number}"
-    tvmaze_airstamp = tvmaze_map.get(tvmaze_key)
+    tmdb_datetime = get_tmdb_datetime(episode, season_number, episode_number)
+    tvmaze_datetime = get_tvmaze_datetime(
+        tvmaze_map,
+        season_number,
+        episode_number,
+        tmdb_datetime,
+    )
 
-    if tvmaze_airstamp:
-        return datetime.fromisoformat(tvmaze_airstamp)
+    # TVMaze only adds a precise air time, TMDB decides the day
+    return tvmaze_datetime or tmdb_datetime
 
-    if episode["air_date"]:
-        try:
-            return date_parser(episode["air_date"])
-        except ValueError:
-            logger.warning(
-                "Invalid air date for S%sE%s from TMDB: %s",
-                season_number,
-                episode_number,
-                episode["air_date"],
-            )
 
+def get_tmdb_datetime(episode, season_number, episode_number):
+    """Return the TMDB air datetime for an episode, or None when unknown."""
+    if not episode["air_date"]:
+        return None
+
+    try:
+        return date_parser(episode["air_date"])
+    except ValueError:
+        logger.warning(
+            "Invalid air date for S%sE%s from TMDB: %s",
+            season_number,
+            episode_number,
+            episode["air_date"],
+        )
+        return None
+
+
+def get_tvmaze_datetime(tvmaze_map, season_number, episode_number, tmdb_datetime):
+    """Return the TVMaze airstamp that refines the TMDB air date.
+
+    The map is keyed by episode number alone because TVMaze numbers seasons
+    differently from TMDB for some shows (issue #1). The candidates are
+    matched on the day instead, so an airstamp from another season cannot be
+    picked up while the precise air time of the right one is kept (issue #5).
+    """
+    if tmdb_datetime is None:
+        return None
+
+    for airstamp in tvmaze_map.get(str(episode_number), []):
+        tvmaze_datetime = parse_airstamp(airstamp, season_number, episode_number)
+
+        if tvmaze_datetime is None:
+            continue
+
+        if abs(tvmaze_datetime - tmdb_datetime) <= TVMAZE_DAY_TOLERANCE:
+            return tvmaze_datetime
+
+    logger.debug(
+        "No TVMaze air time matching TMDB %s for S%sE%s",
+        tmdb_datetime.date(),
+        season_number,
+        episode_number,
+    )
     return None
 
 
+def parse_airstamp(airstamp, season_number, episode_number):
+    """Return an aware datetime for a TVMaze airstamp, or None when invalid."""
+    try:
+        tvmaze_datetime = datetime.fromisoformat(airstamp)
+    except ValueError:
+        logger.warning(
+            "Invalid airstamp for S%sE%s from TVMaze: %s",
+            season_number,
+            episode_number,
+            airstamp,
+        )
+        return None
+
+    if timezone.is_naive(tvmaze_datetime):
+        tvmaze_datetime = tvmaze_datetime.replace(tzinfo=UTC)
+
+    return tvmaze_datetime
+
+
 def get_tvmaze_episode_map(tvdb_id):
-    """Fetch and process episode data from TVMaze using TVDB ID with caching."""
-    cache_key = f"tvmaze_map_{tvdb_id}"
+    """Fetch and process episode data from TVMaze using TVDB ID with caching.
+
+    Episodes are grouped by episode number, holding every airstamp TVMaze has
+    for that number across its own seasons. The caller picks the one matching
+    the TMDB air date, so the two numbering schemes never have to line up.
+
+    Only episodes with a known air time are kept. TVMaze still builds an
+    airstamp when it has none, placing it at midday in the network timezone,
+    which would otherwise be stored as if it were the real broadcast time.
+    """
+    # Versioned, the cached contents changed with the airtime requirement
+    cache_key = f"tvmaze_map_v3_{tvdb_id}"
     cached_map = cache.get(cache_key)
 
     if cached_map:
@@ -381,11 +452,10 @@ def get_tvmaze_episode_map(tvdb_id):
         episodes = show_response["_embedded"]["episodes"]
 
         for episode in episodes:
-            season_num = episode.get("season")
             episode_num = episode.get("number")
-            if season_num is not None and episode_num is not None:
-                key = f"{season_num}_{episode_num}"
-                tvmaze_map[key] = episode.get("airstamp")
+            airstamp = episode.get("airstamp")
+            if episode_num is not None and airstamp and episode.get("airtime"):
+                tvmaze_map.setdefault(str(episode_num), []).append(airstamp)
 
     cache.set(cache_key, tvmaze_map)
     logger.info(

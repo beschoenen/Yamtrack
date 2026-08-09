@@ -75,9 +75,9 @@ class CalendarTVTests(CalendarFixturesMixin, TestCase):
         }
 
         mock_get_tvmaze_episode_map.return_value = {
-            "1_1": "2008-01-20T22:00:00+00:00",
-            "1_2": "2008-01-27T22:00:00+00:00",
-            "1_3": "2008-02-03T22:00:00+00:00",
+            "1": ["2008-01-20T22:00:00+00:00"],
+            "2": ["2008-01-27T22:00:00+00:00"],
+            "3": ["2008-02-03T22:00:00+00:00"],
         }
 
         events_bulk = []
@@ -236,18 +236,70 @@ class CalendarTVTests(CalendarFixturesMixin, TestCase):
 
         result = get_tvmaze_episode_map("81189")
 
-        self.assertEqual(len(result), 2)
-        self.assertIn("1_1", result)
-        self.assertIn("1_2", result)
-        self.assertEqual(result["1_1"], "2008-01-20T22:00:00+00:00")
-        self.assertEqual(result["1_2"], "2008-01-27T22:00:00+00:00")
+        self.assertEqual(
+            result,
+            {
+                "1": ["2008-01-20T22:00:00+00:00"],
+                "2": ["2008-01-27T22:00:00+00:00"],
+            },
+        )
 
-        cached_result = cache.get("tvmaze_map_81189")
+        cached_result = cache.get("tvmaze_map_v3_81189")
         self.assertEqual(cached_result, result)
 
         mock_api_request.reset_mock()
         get_tvmaze_episode_map("81189")
         mock_api_request.assert_not_called()
+
+    @patch("events.calendar.tv.services.api_request")
+    def test_get_tvmaze_episode_map_skips_episodes_without_air_time(
+        self,
+        mock_api_request,
+    ):
+        """Airstamps standing in for an unknown air time are left out.
+
+        TVMaze still builds an airstamp when it has no air time, placing it at
+        midday in the network timezone, which is not a real broadcast time.
+        """
+        cache.clear()
+
+        mock_api_request.side_effect = [
+            {"id": 87753},
+            {
+                "_embedded": {
+                    "episodes": [
+                        {
+                            "season": 1,
+                            "number": 1,
+                            "airstamp": "2026-07-27T16:00:00+00:00",
+                            "airtime": "",
+                        },
+                        {
+                            "season": 1,
+                            "number": 2,
+                            "airstamp": "2026-08-03T20:00:00+00:00",
+                            "airtime": "16:00",
+                        },
+                    ],
+                },
+            },
+        ]
+
+        result = get_tvmaze_episode_map("468000")
+
+        self.assertEqual(result, {"2": ["2026-08-03T20:00:00+00:00"]})
+
+    def test_get_episode_datetime_keeps_tmdb_day_without_tvmaze_air_time(self):
+        """Episodes TVMaze cannot time keep the TMDB day and no air time."""
+        result = get_episode_datetime(
+            {"air_date": "2026-07-27"},
+            season_number=1,
+            episode_number=1,
+            tvmaze_map={},
+        )
+
+        self.assertEqual(result, date_parser("2026-07-27"))
+        self.assertTrue(Event(datetime=result).is_sentinel_time)
 
     @patch("events.calendar.tv.services.api_request")
     def test_get_tvmaze_episode_map_lookup_failure(self, mock_api_request):
@@ -270,6 +322,196 @@ class CalendarTVTests(CalendarFixturesMixin, TestCase):
         )
 
         self.assertEqual(result, date_parser("2025-01-31"))
+
+    def test_get_episode_datetime_uses_tvmaze_time_for_matching_day(self):
+        """TVMaze refines the TMDB date with its exact air time."""
+        result = get_episode_datetime(
+            {"air_date": "2025-01-31"},
+            season_number=1,
+            episode_number=2,
+            tvmaze_map={"2": ["2025-01-31T22:00:00+00:00"]},
+        )
+
+        self.assertEqual(
+            result,
+            datetime.datetime.fromisoformat("2025-01-31T22:00:00+00:00"),
+        )
+
+    def test_get_episode_datetime_accepts_tvmaze_across_midnight(self):
+        """A late night broadcast landing on the next UTC day is still used."""
+        result = get_episode_datetime(
+            {"air_date": "2025-01-31"},
+            season_number=1,
+            episode_number=2,
+            tvmaze_map={"2": ["2025-02-01T01:00:00+00:00"]},
+        )
+
+        self.assertEqual(
+            result,
+            datetime.datetime.fromisoformat("2025-02-01T01:00:00+00:00"),
+        )
+
+    def test_get_episode_datetime_ignores_mismatched_tvmaze_season(self):
+        """Season numbering mismatches must not override the TMDB date (#1).
+
+        TMDB season 11 of Futurama airs in 2026, while TVMaze season 11 is the
+        2023 revival, so the lookup hits a completely different season.
+        """
+        result = get_episode_datetime(
+            {"air_date": "2026-08-03"},
+            season_number=11,
+            episode_number=1,
+            tvmaze_map={"1": ["2023-07-24T02:00:00+00:00"]},
+        )
+
+        self.assertEqual(result, date_parser("2026-08-03"))
+
+    def test_get_episode_datetime_keeps_air_time_across_season_numbering(self):
+        """The air time survives a numbering mismatch (#5).
+
+        TMDB season 11 of Futurama is TVMaze season 14, so the right airstamp
+        sits under another season number alongside a 2023 one for the same
+        episode number.
+        """
+        result = get_episode_datetime(
+            {"air_date": "2026-08-03"},
+            season_number=11,
+            episode_number=1,
+            tvmaze_map={
+                "1": [
+                    "2023-07-24T02:00:00+00:00",
+                    "2026-08-04T02:00:00+00:00",
+                ],
+            },
+        )
+
+        self.assertEqual(
+            result,
+            datetime.datetime.fromisoformat("2026-08-04T02:00:00+00:00"),
+        )
+
+    def test_get_episode_datetime_separates_episodes_airing_the_same_day(self):
+        """Two episodes on one day each keep their own air time."""
+        tvmaze_map = {
+            "1": ["2026-08-04T02:00:00+00:00"],
+            "2": ["2026-08-04T02:30:00+00:00"],
+        }
+
+        first = get_episode_datetime(
+            {"air_date": "2026-08-03"},
+            season_number=11,
+            episode_number=1,
+            tvmaze_map=tvmaze_map,
+        )
+        second = get_episode_datetime(
+            {"air_date": "2026-08-03"},
+            season_number=11,
+            episode_number=2,
+            tvmaze_map=tvmaze_map,
+        )
+
+        self.assertEqual(
+            first,
+            datetime.datetime.fromisoformat("2026-08-04T02:00:00+00:00"),
+        )
+        self.assertEqual(
+            second,
+            datetime.datetime.fromisoformat("2026-08-04T02:30:00+00:00"),
+        )
+
+    @patch("events.calendar.tv.get_tvmaze_episode_map")
+    def test_process_season_episodes_keeps_real_air_times(
+        self,
+        mock_get_tvmaze_episode_map,
+    ):
+        """A renumbered season no longer falls back to the sentinel time."""
+        mock_get_tvmaze_episode_map.return_value = {
+            "1": [
+                "2023-07-24T02:00:00+00:00",
+                "2026-08-04T02:00:00+00:00",
+            ],
+            "2": [
+                "2023-07-31T02:00:00+00:00",
+                "2026-08-04T02:30:00+00:00",
+            ],
+        }
+
+        events_bulk = []
+        process_season_episodes(
+            self.season_item,
+            {
+                "season_number": 11,
+                "episodes": [
+                    {"episode_number": 1, "air_date": "2026-08-03"},
+                    {"episode_number": 2, "air_date": "2026-08-03"},
+                ],
+                "tvdb_id": "73871",
+            },
+            events_bulk,
+        )
+
+        by_number = {event.content_number: event for event in events_bulk}
+        self.assertFalse(by_number[1].is_sentinel_time)
+        self.assertFalse(by_number[2].is_sentinel_time)
+        self.assertEqual(
+            by_number[1].datetime,
+            datetime.datetime.fromisoformat("2026-08-04T02:00:00+00:00"),
+        )
+        self.assertEqual(
+            by_number[2].datetime,
+            datetime.datetime.fromisoformat("2026-08-04T02:30:00+00:00"),
+        )
+
+    def test_get_episode_datetime_ignores_tvmaze_without_tmdb_date(self):
+        """An unverifiable TVMaze stamp is dropped rather than trusted."""
+        result = get_episode_datetime(
+            {"air_date": ""},
+            season_number=11,
+            episode_number=1,
+            tvmaze_map={"1": ["2023-07-24T02:00:00+00:00"]},
+        )
+
+        self.assertIsNone(result)
+
+    def test_get_episode_datetime_ignores_invalid_tvmaze_airstamp(self):
+        """A malformed airstamp falls back to the TMDB date."""
+        result = get_episode_datetime(
+            {"air_date": "2025-01-31"},
+            season_number=1,
+            episode_number=2,
+            tvmaze_map={"2": ["not-a-timestamp"]},
+        )
+
+        self.assertEqual(result, date_parser("2025-01-31"))
+
+    @patch("events.calendar.tv.get_tvmaze_episode_map")
+    def test_process_season_episodes_keeps_upcoming_episodes_unreleased(
+        self,
+        mock_get_tvmaze_episode_map,
+    ):
+        """Mismatched TVMaze dates must not mark upcoming episodes as aired."""
+        mock_get_tvmaze_episode_map.return_value = {
+            "1": ["2023-07-24T02:00:00+00:00"],
+            "2": ["2023-07-31T02:00:00+00:00"],
+        }
+
+        events_bulk = []
+        process_season_episodes(
+            self.season_item,
+            {
+                "season_number": 11,
+                "episodes": [
+                    {"episode_number": 1, "air_date": "2026-08-03"},
+                    {"episode_number": 2, "air_date": "2099-08-10"},
+                ],
+                "tvdb_id": "73871",
+            },
+            events_bulk,
+        )
+
+        by_number = {event.content_number: event for event in events_bulk}
+        self.assertEqual(by_number[1].datetime, date_parser("2026-08-03"))
+        self.assertEqual(by_number[2].datetime, date_parser("2099-08-10"))
 
     def test_get_episode_datetime_returns_none_for_invalid_date(self):
         """Invalid or missing episode dates should resolve to None (unknown)."""
