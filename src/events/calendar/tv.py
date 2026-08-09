@@ -56,9 +56,11 @@ def get_seasons_to_process(tv_item):
         logger.warning("No seasons found for TV show: %s", tv_item)
         return []
 
-    season_numbers = [
-        season["season_number"] for season in tv_metadata["related"]["seasons"]
-    ]
+    episode_counts = {
+        season["season_number"]: season.get("max_progress")
+        for season in tv_metadata["related"]["seasons"]
+    }
+    season_numbers = list(episode_counts)
 
     if not season_numbers:
         logger.warning("No valid seasons found for TV show: %s", tv_item)
@@ -72,25 +74,69 @@ def get_seasons_to_process(tv_item):
         item__media_type=MediaTypes.SEASON.value,
     ).select_related("item")
 
-    seasons_with_events = {event.item.season_number for event in existing_season_events}
+    stored_events = get_stored_events_by_season(existing_season_events)
+    stale_seasons = [
+        season_num
+        for season_num in season_numbers
+        if season_num in stored_events
+        and has_stale_events(stored_events[season_num], episode_counts[season_num])
+    ]
+
     seasons_to_process = [
         season_num
         for season_num in season_numbers
-        if season_num not in seasons_with_events
+        if season_num not in stored_events
         or (next_episode_season and season_num >= next_episode_season)
+        or season_num in stale_seasons
     ]
 
     if not seasons_to_process:
         return []
 
     logger.info(
-        "%s - Processing %d seasons (Next episode season: %s)",
+        "%s - Processing %d seasons (Next episode season: %s, Stale seasons: %s)",
         tv_item,
         len(seasons_to_process),
         next_episode_season,
+        stale_seasons or "none",
     )
 
     return seasons_to_process
+
+
+def get_stored_events_by_season(season_events):
+    """Group stored episode numbers and sentinel dates by season number."""
+    stored_events = {}
+
+    for event in season_events:
+        if event.content_number is None:
+            continue
+
+        season = stored_events.setdefault(
+            event.item.season_number,
+            {"episode_numbers": set(), "has_sentinel": False},
+        )
+        season["episode_numbers"].add(event.content_number)
+        season["has_sentinel"] = season["has_sentinel"] or event.is_max_datetime
+
+    return stored_events
+
+
+def has_stale_events(stored_season, episode_count):
+    """Return True when stored events no longer match the provider episodes.
+
+    Seasons keep their events forever once written, so an old reload can leave
+    missing, phantom or undated episodes behind (issue #2). Sentinel dates hide
+    an episode from the released counts, so those seasons are retried until the
+    provider publishes a real date.
+    """
+    if stored_season["has_sentinel"]:
+        return True
+
+    if not episode_count:
+        return False
+
+    return stored_season["episode_numbers"] != set(range(1, episode_count + 1))
 
 
 def process_tv_seasons(tv_item, seasons_to_process, events_bulk):

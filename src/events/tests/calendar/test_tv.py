@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from app.models import TV, Item, Season, Status
 from events.calendar.helpers import date_parser
+from events.calendar.main import fetch_releases
 from events.calendar.tv import (
     get_episode_datetime,
     get_seasons_to_process,
@@ -15,7 +16,7 @@ from events.calendar.tv import (
     process_season_episodes,
     process_tv,
 )
-from events.models import Event
+from events.models import Event, SentinelDatetime
 from events.tests.calendar.utils import CalendarFixturesMixin
 
 
@@ -297,6 +298,127 @@ class CalendarTVTests(CalendarFixturesMixin, TestCase):
         mock_tv.return_value = {"related": {"seasons": []}}
 
         self.assertEqual(get_seasons_to_process(self.tv_item), [])
+
+    def _store_season_events(self, episode_numbers, sentinel_numbers=()):
+        """Create stored events for the fixture season."""
+        for episode_number in episode_numbers:
+            datetime_value = (
+                SentinelDatetime.max_datetime()
+                if episode_number in sentinel_numbers
+                else date_parser("2026-02-16")
+            )
+            Event.objects.create(
+                item=self.season_item,
+                content_number=episode_number,
+                datetime=datetime_value,
+            )
+
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_get_seasons_to_process_skips_complete_past_season(self, mock_tv):
+        """A season matching the provider episode list is left alone."""
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1, "max_progress": 3}]},
+            "next_episode_season": 2,
+        }
+        self._store_season_events([1, 2, 3])
+
+        self.assertEqual(get_seasons_to_process(self.tv_item), [])
+
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_get_seasons_to_process_reprocesses_season_with_sentinel(self, mock_tv):
+        """Undated stored episodes must be retried, not kept forever (#2).
+
+        The Simpsons season 37 kept a sentinel row for episode 15 and a phantom
+        row for episode 16 while the provider had real dates for 15 episodes.
+        """
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1, "max_progress": 3}]},
+            "next_episode_season": 2,
+        }
+        self._store_season_events([1, 2, 3], sentinel_numbers=[3])
+
+        self.assertEqual(get_seasons_to_process(self.tv_item), [1])
+
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_get_seasons_to_process_reprocesses_season_with_missing_episode(
+        self,
+        mock_tv,
+    ):
+        """A gap in the stored episode numbers marks the season stale."""
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1, "max_progress": 3}]},
+            "next_episode_season": 2,
+        }
+        self._store_season_events([1, 3])
+
+        self.assertEqual(get_seasons_to_process(self.tv_item), [1])
+
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_get_seasons_to_process_reprocesses_season_with_phantom_episode(
+        self,
+        mock_tv,
+    ):
+        """Stored episodes that no longer exist upstream mark the season stale."""
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1, "max_progress": 3}]},
+            "next_episode_season": 2,
+        }
+        self._store_season_events([1, 2, 3, 4])
+
+        self.assertEqual(get_seasons_to_process(self.tv_item), [1])
+
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_get_seasons_to_process_keeps_season_without_episode_count(self, mock_tv):
+        """Without a provider episode count the stored events are trusted."""
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1}]},
+            "next_episode_season": 2,
+        }
+        self._store_season_events([1, 2, 3])
+
+        self.assertEqual(get_seasons_to_process(self.tv_item), [])
+
+    @patch("events.calendar.tv.get_tvmaze_episode_map")
+    @patch("events.calendar.tv.tmdb.tv_with_seasons")
+    @patch("events.calendar.tv.tmdb.tv")
+    def test_reload_repairs_stale_season_events(
+        self,
+        mock_tv,
+        mock_tv_with_seasons,
+        mock_get_tvmaze_episode_map,
+    ):
+        """A reload rebuilds a stale season and drops its phantom episodes (#2)."""
+        mock_tv.return_value = {
+            "related": {"seasons": [{"season_number": 1, "max_progress": 3}]},
+            "next_episode_season": 2,
+        }
+        mock_tv_with_seasons.return_value = {
+            "season/1": {
+                "image": "http://example.com/season1.jpg",
+                "season_number": 1,
+                "episodes": [
+                    {"episode_number": 1, "air_date": "2026-02-02"},
+                    {"episode_number": 2, "air_date": "2026-02-09"},
+                    {"episode_number": 3, "air_date": "2026-02-16"},
+                ],
+            },
+        }
+        mock_get_tvmaze_episode_map.return_value = {}
+
+        # Missing episode 2, undated episode 3 and a phantom episode 4
+        self._store_season_events([1, 3, 4], sentinel_numbers=[3, 4])
+
+        fetch_releases(items_to_process=[self.tv_item])
+
+        events = Event.objects.filter(item=self.season_item)
+        self.assertEqual(
+            {event.content_number: event.datetime for event in events},
+            {
+                1: date_parser("2026-02-02"),
+                2: date_parser("2026-02-09"),
+                3: date_parser("2026-02-16"),
+            },
+        )
 
     @patch("events.calendar.tv.get_seasons_to_process")
     def test_process_tv_returns_when_no_seasons_need_processing(
