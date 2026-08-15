@@ -284,7 +284,6 @@ def check_statistics_structure(test_case, item):
     test_case.assertIn("top_rated", item)
     test_case.assertIn("status_distribution", item)
     test_case.assertIn("status_pie_chart_data", item)
-    test_case.assertIn("timeline", item)
     test_case.assertIsInstance(item["media_count"], dict)
     test_case.assertIn("total", item["media_count"])
 

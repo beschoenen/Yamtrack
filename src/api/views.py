@@ -20,7 +20,6 @@ from app.statistics import (
     get_score_distribution,
     get_status_distribution,
     get_status_pie_chart_data,
-    get_timeline,
     get_user_media,
 )
 from events import tasks
@@ -63,7 +62,6 @@ from .serializers import (
     HistorySerializer,
     InfoSerializer,
     MediaSerializer,
-    TimelineItemSerializer,
     serialize_data,
 )
 
@@ -4074,7 +4072,6 @@ class StatisticsView(drf_views.APIView):
         status_pie_chart_data = get_status_pie_chart_data(
             status_distribution,
         )
-        timeline = get_timeline(user_media)
         activity_data = get_activity_data(request.user, start_date, end_date)
 
         statistics = {
@@ -4087,15 +4084,6 @@ class StatisticsView(drf_views.APIView):
             "top_rated": serialize_data(top_rated, many=True),
             "status_distribution": status_distribution,
             "status_pie_chart_data": status_pie_chart_data,
-            "timeline": {
-                month: serialize_data(
-                    items,
-                    many=True,
-                    context={"request": request},
-                    serializer_class=TimelineItemSerializer,
-                )
-                for month, items in (timeline or {}).items()
-            },
         }
 
         return Response(statistics, status=HTTP.OK)
