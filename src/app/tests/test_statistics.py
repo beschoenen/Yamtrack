@@ -942,7 +942,7 @@ class StatisticsTests(TestCase):
         # Longest streak should be 4 (Mar 23-26)
         self.assertEqual(longest_streak, 4)
 
-        # Test no current streak
+        # Test streak still running when today has no activity yet
         date_counts = {
             yesterday: 2,
             two_days_ago: 3,
@@ -955,9 +955,26 @@ class StatisticsTests(TestCase):
             today,
         )
 
-        # No activity today, so current streak is 0
-        self.assertEqual(current_streak, 0)
+        # The day in progress doesn't break the streak (Mar 29-30)
+        self.assertEqual(current_streak, 2)
         # Longest streak should be 2 (Mar 29-30)
+        self.assertEqual(longest_streak, 2)
+
+        # Test no current streak, last activity was two days ago
+        date_counts = {
+            two_days_ago: 3,
+            datetime.date(2025, 3, 28): 1,
+            datetime.date(2025, 3, 26): 1,
+        }
+
+        current_streak, longest_streak = statistics.calculate_streaks(
+            date_counts,
+            today,
+        )
+
+        # A full day passed without activity, so the streak is broken
+        self.assertEqual(current_streak, 0)
+        # Longest streak should be 2 (Mar 28-29)
         self.assertEqual(longest_streak, 2)
 
         # Test empty data
